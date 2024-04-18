@@ -82,8 +82,6 @@ fn take_pic() {
 }
 
 fn preprocess(img: &RgbImage) -> ndarray::Array4<f32> {
-    // Convert to RGB
-    // let rgb_img = img.to_rgb8();
 
     // Resize image using nearest neighbor algorithm
     let resized = image::imageops::resize(img, 320, 240, image::imageops::FilterType::Nearest);
