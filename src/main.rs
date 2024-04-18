@@ -9,6 +9,7 @@ use nokhwa::{
 };
 use ort::{self, inputs, CPUExecutionProvider, CUDAExecutionProvider, GraphOptimizationLevel};
 use ort::{Session, TensorElementType, ValueType};
+use std::env;
 use std::error::Error;
 
 const WIDTH: usize = 320;
@@ -85,11 +86,10 @@ fn preprocess(img: &RgbImage) -> ndarray::Array4<f32> {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut window = create_window("Raqote", WIDTH, HEIGHT)?;
     let mut cam = initialize_camera()?;
-    // let input = preprocess(original_img.clone().as_mut_rgb8().unwrap());
     let session = Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(4)?
-        .commit_from_file(r"C:\Users\anand\.rust\webcamcapture\version-RFB-320.onnx")?;
+        .commit_from_file(env::current_dir()?.join("version-RFB-320.onnx"))?;
 
     println!("Inputs:");
     for (i, input) in session.inputs.iter().enumerate() {
