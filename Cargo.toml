@@ -1,0 +1,25 @@
+[package]
+name = "webcamcapture"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.82"
+font-kit = "0.13.0"
+minifb = "0.25.0"
+ndarray = "0.15.6"
+ndarray-npy = "0.8.1"
+ort = { path = "../ort", features = [] }
+raqote = "0.8.4"
+[features]
+default = ["nokhwa/default"]
+
+[dependencies.nokhwa]
+path = "C:\\Users\\anand\\.rust\\nokhwa"
+features = ["input-native", "output-threaded"]
+
+[dependencies.image]
+version = "0.24.5"
+features = ["png"]
