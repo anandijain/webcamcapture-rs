@@ -15,7 +15,7 @@ use nokhwa::{
 
 use ort::{self, inputs, CPUExecutionProvider, CUDAExecutionProvider, GraphOptimizationLevel};
 use ort::{Session, TensorElementType, ValueType};
-use raqote::{DrawOptions, DrawTarget};
+use raqote::{DrawOptions, DrawTarget, PathBuilder, SolidSource, Source};
 use std::cmp::Ordering;
 use std::env;
 use std::error::Error;
@@ -249,6 +249,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
 
             dt.draw_image_at(0., 0., &draw_img, &DrawOptions::default());
+            let mut pb = PathBuilder::new();
+            pb.rect(real_boxes[[0, 0]] as f32, real_boxes[[0, 1]] as f32, real_boxes[[0, 2]] as f32, real_boxes[[0, 3]] as f32);
+            let path = pb.finish();
+            dt.fill(&path, &Source::Solid(SolidSource::from_unpremultiplied_argb(0xff, 0, 0xff, 0)), &DrawOptions::new());
 
             // window.update_with_buffer(&buffer, WIDTH, HEIGHT)?;
             window.update_with_buffer(dt.get_data(), size.0, size.1).unwrap();
