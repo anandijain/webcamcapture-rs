@@ -1,2 +1,4 @@
 /target
 *.jpeg
+*.png
+.ipynb_checkpoints/

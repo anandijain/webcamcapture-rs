@@ -252,9 +252,6 @@ fn main() -> Result<(), anyhow::Error>{
     let outputs = session
         .run(inputs!["input" => input.view()].unwrap())
         .unwrap();
-
-    // You can print out the duration or use it in other parts of your code
-
     let scores = outputs["scores"]
         .try_extract_tensor::<f32>()
         .unwrap()
@@ -268,6 +265,9 @@ fn main() -> Result<(), anyhow::Error>{
     let boxes = boxes.permuted_axes(vec![2, 1, 0]);
     println!("Scores: {:?}", scores);
     println!("Boxes: {:?}", boxes.shape());
+
+    // You can print out the duration or use it in other parts of your code
+
     let selected = boxes.slice(s![0, 1, ..]);
     println!("Boxes: {:?}", selected);
 
