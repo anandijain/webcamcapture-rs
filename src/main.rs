@@ -181,10 +181,10 @@ fn box_probs_from_outputs(boxes: &ArrayD<f32>, scores: &ArrayD<f32>) -> Array2<f
 }
 
 fn float_bboxes_to_int(bboxes: Array2<f32>, width: usize, height: usize) -> Array2<u32> {
-    let ls = bboxes.slice(s![.., 1]).mapv(|x| (x * width as f32) as u32);
-    let ts = bboxes.slice(s![.., 0]).mapv(|x| (x * height as f32) as u32);
-    let rs = bboxes.slice(s![.., 3]).mapv(|x| (x * width as f32) as u32);
-    let bs = bboxes.slice(s![.., 2]).mapv(|x| (x * height as f32) as u32);
+    let ls = bboxes.slice(s![.., 0]).mapv(|x| (x * width as f32) as u32);
+    let ts = bboxes.slice(s![.., 1]).mapv(|x| (x * height as f32) as u32);
+    let rs = bboxes.slice(s![.., 2]).mapv(|x| (x * width as f32) as u32);
+    let bs = bboxes.slice(s![.., 3]).mapv(|x| (x * height as f32) as u32);
     let real_boxes = Array::from_shape_fn((bboxes.shape()[0], 4), |(i, j)| match j {
         0 => ls[i],
         1 => ts[i],
