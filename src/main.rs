@@ -1,7 +1,7 @@
 use image::imageops::FilterType;
 use image::io::Reader as ImageReader;
 use image::{
-    imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, ImageOutputFormat, RgbImage,
+    imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, ImageOutputFormat, Rgb, RgbImage
 };
 use minifb::{Key, Window, WindowOptions};
 use ndarray::prelude::*;
@@ -20,10 +20,10 @@ use std::cmp::Ordering;
 use std::env;
 use std::error::Error;
 
-const WIDTH: usize = 320;
-const HEIGHT: usize = 240;
-// const WIDTH: usize = 1000;
-// const HEIGHT: usize = 480;
+// const WIDTH: usize = 320;
+// const HEIGHT: usize = 240;
+const WIDTH: usize = 640;
+const HEIGHT: usize = 480;
 const IOU_THRESHOLD: f32 = 0.5;
 const TOP_K: isize = -1;
 const PROB_THRESHOLD: f32 = 0.7;
@@ -104,13 +104,7 @@ fn preprocess(img: &RgbImage) -> ndarray::Array4<f32> {
     expanded
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let mut cam = initialize_camera()?;
-    let session = Session::builder()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(4)?
-        .commit_from_file(env::current_dir()?.join("version-RFB-320.onnx"))?;
-
+fn display_model_inputs_outputs(session: &Session) {
     println!("Inputs:");
     for (i, input) in session.inputs.iter().enumerate() {
         println!(
@@ -127,142 +121,186 @@ fn main() -> Result<(), Box<dyn Error>> {
             display_value_type(&output.output_type)
         );
     }
-    let frame = cam.frame()?;
+}
+/*
+Inputs:
+    0 input: Tensor<f32>(1, 3, 240, 320)
+Outputs:
+    0 scores: Tensor<f32>(1, 4420, 2)
+    1 boxes: Tensor<f32>(1, 4420, 4)
+*/
+fn prep_img_and_infer(
+    img: &RgbImage,
+    session: &Session,
+) -> Result<(ArrayD<f32>, ArrayD<f32>), anyhow::Error> {
+    let input = preprocess(&img);
+    let outputs = session.run(inputs!["input" => input.view()]?)?;
+    let mut scores = outputs["scores"]
+        .try_extract_tensor::<f32>()?
+        .t()
+        .into_owned();
+    let mut boxes = outputs["boxes"]
+        .try_extract_tensor::<f32>()?
+        .t()
+        .into_owned();
+    boxes = boxes.permuted_axes(vec![2, 1, 0]);
+    scores = scores.permuted_axes(vec![2, 1, 0]);
+    boxes = boxes.index_axis(Axis(0), 0).to_owned();
+    scores = scores.index_axis(Axis(0), 0).to_owned();
+    Ok((boxes, scores))
+}
 
+fn box_probs_from_outputs(boxes: &ArrayD<f32>, scores: &ArrayD<f32>) -> Array2<f32> {
+    let cs = scores.slice(s![.., 1]);
+    let mask = cs.mapv(|x| x > PROB_THRESHOLD);
+
+    let indices: Vec<_> = mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i) } else { None })
+        .collect();
+
+    let filtered_probs = cs.select(Axis(0), &indices);
+    let subset_boxes = boxes.select(Axis(0), &indices);
+    println!("Subset boxes: {:?}", subset_boxes);
+    println!("scores: {:?}", scores.shape());
+    println!("Boxes: {:?}", boxes.shape());
+
+    println!("Mask: {:?}", filtered_probs.shape());
+    // box_probs = np.concatenate([subset_boxes, probs.reshape(-1, 1)], axis=1)
+    println!("Filtered probs: {:?}", filtered_probs);
+
+    let box_probs = Array::from_shape_fn((indices.len(), 5), |(i, j)| {
+        if j == 4 {
+            filtered_probs[i]
+        } else {
+            subset_boxes[[i, j]]
+        }
+    });
+    box_probs
+}
+
+fn float_bboxes_to_int(bboxes: Array2<f32>, width: usize, height: usize) -> Array2<u32> {
+    let ls = bboxes.slice(s![.., 1]).mapv(|x| (x * width as f32) as u32);
+    let ts = bboxes.slice(s![.., 0]).mapv(|x| (x * height as f32) as u32);
+    let rs = bboxes.slice(s![.., 3]).mapv(|x| (x * width as f32) as u32);
+    let bs = bboxes.slice(s![.., 2]).mapv(|x| (x * height as f32) as u32);
+    let real_boxes = Array::from_shape_fn((bboxes.shape()[0], 4), |(i, j)| match j {
+        0 => ls[i],
+        1 => ts[i],
+        2 => rs[i],
+        3 => bs[i],
+        _ => unreachable!(),
+    });
+    real_boxes
+}
+
+fn capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), anyhow::Error> {
     let mut window = create_window("Raqote", WIDTH, HEIGHT)?;
-    
     let size = window.get_size();
     let mut dt = DrawTarget::new(size.0 as i32, size.1 as i32);
-    
     while window.is_open() && !window.is_key_down(Key::Escape) {
         if let Ok(frame) = cam.frame() {
             let img = frame.decode_image::<RgbFormat>().unwrap(); // Assumes successful decoding
-                                                                  // Resize the image
-
-            // let img = image::open(r"C:/Users/anand/src/cpp/onnxtest/me.jpg")?.to_rgb8();
-            let (orig_width, orig_height) = img.dimensions();
             let rimg = imageops::resize(&img, WIDTH as u32, HEIGHT as u32, imageops::Lanczos3);
-
-            let input = preprocess(&rimg);
-            let outputs = session.run(inputs!["input" => input.view()]?)?;
-            let mut scores = outputs["scores"]
-                .try_extract_tensor::<f32>()?
-                .t()
-                .into_owned();
-            let mut boxes = outputs["boxes"]
-                .try_extract_tensor::<f32>()?
-                .t()
-                .into_owned();
-            boxes = boxes.permuted_axes(vec![2, 1, 0]);
-            scores = scores.permuted_axes(vec![2, 1, 0]);
-
-            scores = scores.index_axis(Axis(0), 0).to_owned();
-            boxes = boxes.index_axis(Axis(0), 0).to_owned();
-            let cs = scores.slice(s![.., 1]);
-            let mask = cs.mapv(|x| x > PROB_THRESHOLD);
-            // np.where(mask)[0]
-            // array([3903, 3943, 3945, 3983, 4270, 4290, 4291, 4292, 4293], dtype=int64)
-
-            let indices: Vec<_> = mask
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &m)| if m { Some(i) } else { None })
-                .collect();
-
-            // print indices shape
-            println!("Indices: {:?}", indices);
-
-            // let filtered_probs = cs[indices.clone()];
-            let filtered_probs = cs.select(Axis(0), &indices);
-            let subset_boxes = // boxes[indices, ..];
-        indices.iter().map(|&i| boxes.index_axis(Axis(0), i)).collect::<Vec<_>>();
-            println!("Subset boxes: {:?}", subset_boxes);
-            println!("scores: {:?}", scores.shape());
-            println!("Boxes: {:?}", boxes.shape());
-
-            println!("Mask: {:?}", filtered_probs.shape());
-            // box_probs = np.concatenate([subset_boxes, probs.reshape(-1, 1)], axis=1)
-            println!("Filtered probs: {:?}", filtered_probs);
-
-            let box_probs = Array::from_shape_fn((indices.len(), 5), |(i, j)| {
-                if j == 4 {
-                    filtered_probs[i]
-                } else {
-                    subset_boxes[i][j]
-                }
-            });
-
-            // let mut picked_box_probs = vec![];
-            // println!("Box probs: {:?}", box_probs);
-            // println!("Box probs: {:?}", box_probs.shape());
-
-            // box_probs = hard_nms(box_probs,
-            //    iou_threshold=iou_threshold,
-            //    top_k=top_k,
-            //    )
-            let bboxes_idxs = hard_nms(&box_probs, IOU_THRESHOLD, TOP_K, 200);
-            // println!("BBoxes_idxs: {:?}", bboxes_idxs);
-            let bboxes = box_probs.select(Axis(0), &bboxes_idxs);
-            // println!("BBoxes: {:?}", bboxes);
-
-            // picked_box_probs.append(box_probs)
-            //     picked_box_probs[:, 0] *= width
-            // picked_box_probs[:, 1] *= height
-            // picked_box_probs[:, 2] *= width
-            // picked_box_probs[:, 3] *= height
-            // let real_boxes = Array::zeros((bboxes.shape()[0], 4));
-            let ls = bboxes.slice(s![.., 1]).mapv(|x| x * WIDTH as f32);
-            let ts = bboxes.slice(s![.., 0]).mapv(|x| x * HEIGHT as f32);
-            let rs = bboxes.slice(s![.., 3]).mapv(|x| x * WIDTH as f32);
-            let bs = bboxes.slice(s![.., 2]).mapv(|x| x * HEIGHT as f32);
-            let real_boxes = Array::from_shape_fn((bboxes.shape()[0], 4), |(i, j)| match j {
-                0 => ls[i],
-                1 => ts[i],
-                2 => rs[i],
-                3 => bs[i],
-                _ => unreachable!(),
-            })
-            .mapv(|x| x as usize);
-            println!("Real boxes: {:?}", real_boxes);
-            // draw boxes onto image
-            // let mut rimg = rimg.clone();
-            // for bbox in real_boxes.outer_iter() {
-            //     let lt = (bbox[0], bbox[1]);
-            //     let rb = (bbox[2], bbox[3]);
-            //     image::imageops::draw_hollow_rect_mut(&mut rimg, lt, rb, image::Rgb([255, 0, 0]));
-            // }
-                // raqote::d
-            // raqote::Image::
+            let (boxes, scores) = prep_img_and_infer(&rimg, session)?;
+            let box_probs = box_probs_from_outputs(&boxes, &scores);
 
             let buffer: Vec<u32> = rimg
                 .enumerate_pixels()
                 .map(|(_, _, pixel)| {
                     let [r, g, b] = pixel.0;
-                    (0 << 24)| ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+                    (0 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
                 })
                 .collect();
-
             let draw_img = raqote::Image {
                 width: WIDTH as i32,
                 height: HEIGHT as i32,
                 data: &buffer,
             };
-
             dt.draw_image_at(0., 0., &draw_img, &DrawOptions::default());
-            let mut pb = PathBuilder::new();
-            pb.rect(real_boxes[[0, 0]] as f32, real_boxes[[0, 1]] as f32, real_boxes[[0, 2]] as f32, real_boxes[[0, 3]] as f32);
-            let path = pb.finish();
-            dt.fill(&path, &Source::Solid(SolidSource::from_unpremultiplied_argb(0xff, 0, 0xff, 0)), &DrawOptions::new());
-
-            // window.update_with_buffer(&buffer, WIDTH, HEIGHT)?;
-            window.update_with_buffer(dt.get_data(), size.0, size.1).unwrap();
-            // dt.draw_glyphs(font, point_size, ids, positions, src, options)
-
-            // break;
+            window
+                .update_with_buffer(dt.get_data(), size.0, size.1)
+                .unwrap();
         }
     }
+    Ok(())
+}
 
-    cam.stop_stream()?;
+// Function to draw a rectangle on the image
+fn draw_rect(img: &mut RgbImage, bbox: &Array1<u32>, color: Rgb<u8>, line_width: u32) {
+    let (img_width, img_height) = img.dimensions();
+    println!("Image Width: {}, Image Height: {}", img_width, img_height);
+
+    // Extracting bounding box coordinates
+    let left = bbox[0] as i32;
+    let top = bbox[1] as i32;
+    let right = bbox[2] as i32;
+    let bottom = bbox[3] as i32;
+    println!(
+        "Left: {}, Top: {}, Right: {}, Bottom: {}",
+        left, top, right, bottom
+    );
+
+    // Drawing the rectangle
+    for w in 0..line_width as i32 {
+        // Horizontal lines
+        for x in left..=right {
+            if x >= 0 && x < img_width as i32 {
+                if top + w >= 0 && top + w < img_height as i32 {
+                    img.put_pixel(x as u32, (top + w) as u32, color);
+                }
+                if bottom - w >= 0 && bottom - w < img_height as i32 {
+                    img.put_pixel(x as u32, (bottom - w) as u32, color);
+                }
+            }
+        }
+        // Vertical lines
+        for y in top..=bottom {
+            if y >= 0 && y < img_height as i32 {
+                if left + w >= 0 && left + w < img_width as i32 {
+                    img.put_pixel((left + w) as u32, y as u32, color);
+                }
+                if right - w >= 0 && right - w < img_width as i32 {
+                    img.put_pixel((right - w) as u32, y as u32, color);
+                }
+            }
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let session = Session::builder()?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(4)?
+        .commit_from_file(env::current_dir()?.join("version-RFB-320.onnx"))?;
+    display_model_inputs_outputs(&session);
+    // panic!();
+    let mut img = image::open(r"C:/Users/anand/src/cpp/onnxtest/me.jpg")?.to_rgb8();
+    println!("Image dimensions: {:?}", img.dimensions());
+    // let mut cam = initialize_camera()?;
+    // let frame = cam.frame()?;
+
+    let mut rimg = imageops::resize(&img, WIDTH as u32, HEIGHT as u32, imageops::Lanczos3);
+
+    let (orig_width, orig_height) = img.dimensions();
+    let (mut boxes, mut scores) = prep_img_and_infer(&img, &session)?;
+    let box_probs = box_probs_from_outputs(&boxes, &scores);
+    // let bboxes_idxs = hard_nms(&box_probs, IOU_THRESHOLD, TOP_K, 200);
+    // println!("BBoxes_idxs: {:?}", bboxes_idxs);
+    // let bboxes = box_probs.select(Axis(0), &bboxes_idxs);
+    
+    // let pix_bboxes = float_bboxes_to_int(bboxes.clone(), orig_width as usize, orig_height as usize);
+    let pix_bboxes = float_bboxes_to_int(box_probs.clone(), orig_width as usize, orig_height as usize);
+
+    println!("BBoxes: {:?}", pix_bboxes);
+    for i in 0..pix_bboxes.shape()[0] {
+        draw_rect(&mut img, &pix_bboxes.index_axis(Axis(0), i).to_owned(), Rgb([255, 255, 255]), 5);
+    }
+    // draw_rect(&mut img, &pix_bboxes.index_axis(Axis(0), 0).to_owned(), Rgb([255, 255, 255]), 5);
+
+    img.save("drawn.png")?;
+    // cam.stop_stream()?;
     Ok(())
 }
 
