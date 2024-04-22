@@ -1,7 +1,8 @@
 use image::imageops::FilterType;
 use image::io::Reader as ImageReader;
 use image::{
-    imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, ImageOutputFormat, Rgb, RgbImage
+    imageops, DynamicImage, GenericImageView, ImageBuffer, ImageFormat, ImageOutputFormat, Rgb,
+    RgbImage,
 };
 use minifb::{Key, Window, WindowOptions};
 use ndarray::prelude::*;
@@ -13,12 +14,16 @@ use nokhwa::{
     Camera,
 };
 
-use ort::{self, inputs, CPUExecutionProvider, CUDAExecutionProvider, GraphOptimizationLevel};
+use ort::{
+    self, inputs, CPUExecutionProvider, CUDAExecutionProvider, DirectMLExecutionProvider,
+    GraphOptimizationLevel,
+};
 use ort::{Session, TensorElementType, ValueType};
 use raqote::{DrawOptions, DrawTarget, PathBuilder, SolidSource, Source};
 use std::cmp::Ordering;
 use std::env;
 use std::error::Error;
+use std::time::{Duration, Instant};
 
 // const WIDTH: usize = 320;
 // const HEIGHT: usize = 240;
@@ -162,13 +167,13 @@ fn box_probs_from_outputs(boxes: &ArrayD<f32>, scores: &ArrayD<f32>) -> Array2<f
 
     let filtered_probs = cs.select(Axis(0), &indices);
     let subset_boxes = boxes.select(Axis(0), &indices);
-    println!("Subset boxes: {:?}", subset_boxes);
-    println!("scores: {:?}", scores.shape());
-    println!("Boxes: {:?}", boxes.shape());
+    // println!("Subset boxes: {:?}", subset_boxes);
+    // println!("scores: {:?}", scores.shape());
+    // println!("Boxes: {:?}", boxes.shape());
 
-    println!("Mask: {:?}", filtered_probs.shape());
+    // println!("Mask: {:?}", filtered_probs.shape());
     // box_probs = np.concatenate([subset_boxes, probs.reshape(-1, 1)], axis=1)
-    println!("Filtered probs: {:?}", filtered_probs);
+    // println!("Filtered probs: {:?}", filtered_probs);
 
     let box_probs = Array::from_shape_fn((indices.len(), 5), |(i, j)| {
         if j == 4 {
@@ -196,32 +201,55 @@ fn float_bboxes_to_int(bboxes: Array2<f32>, width: usize, height: usize) -> Arra
 }
 
 fn capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), anyhow::Error> {
-    let mut window = create_window("Raqote", WIDTH, HEIGHT)?;
+    let r = cam.resolution();
+    let (cam_width, cam_height) = (r.width(), r.height());
+    let mut window = create_window("Raqote", cam_width as usize, cam_height as usize)?;
     let size = window.get_size();
+    let (orig_width, orig_height) = size;
     let mut dt = DrawTarget::new(size.0 as i32, size.1 as i32);
+
+    let mut frame_count = 0;
+    let mut last_fps_time = Instant::now();
+    let fps_interval = Duration::new(1, 0); // 1 second
+
     while window.is_open() && !window.is_key_down(Key::Escape) {
         if let Ok(frame) = cam.frame() {
-            let img = frame.decode_image::<RgbFormat>().unwrap(); // Assumes successful decoding
+            frame_count += 1;
+
+            let mut img = frame.decode_image::<RgbFormat>().unwrap(); // Assumes successful decoding
             let rimg = imageops::resize(&img, WIDTH as u32, HEIGHT as u32, imageops::Lanczos3);
             let (boxes, scores) = prep_img_and_infer(&rimg, session)?;
             let box_probs = box_probs_from_outputs(&boxes, &scores);
+            let bboxes_idxs = hard_nms(&box_probs, IOU_THRESHOLD, TOP_K, 200);
+            let bboxes = box_probs.select(Axis(0), &bboxes_idxs);
 
-            let buffer: Vec<u32> = rimg
+            let pix_bboxes =
+                float_bboxes_to_int(bboxes.clone(), cam_width as usize, cam_height as usize);
+
+            // println!("BBoxes: {:?}", pix_bboxes);
+            for i in 0..pix_bboxes.shape()[0] {
+                draw_rect(
+                    &mut img,
+                    &pix_bboxes.index_axis(Axis(0), i).to_owned(),
+                    Rgb([255, 255, 255]),
+                    5,
+                );
+            }
+            let buffer: Vec<u32> = img
                 .enumerate_pixels()
                 .map(|(_, _, pixel)| {
                     let [r, g, b] = pixel.0;
                     (0 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
                 })
                 .collect();
-            let draw_img = raqote::Image {
-                width: WIDTH as i32,
-                height: HEIGHT as i32,
-                data: &buffer,
-            };
-            dt.draw_image_at(0., 0., &draw_img, &DrawOptions::default());
-            window
-                .update_with_buffer(dt.get_data(), size.0, size.1)
-                .unwrap();
+
+            window.update_with_buffer(&buffer, size.0, size.1).unwrap();
+            if last_fps_time.elapsed() >= fps_interval {
+                let fps = frame_count as f32 / last_fps_time.elapsed().as_secs_f32();
+                println!("FPS: {}", fps);
+                frame_count = 0;
+                last_fps_time = Instant::now();
+            }
         }
     }
     Ok(())
@@ -230,17 +258,17 @@ fn capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), anyho
 // Function to draw a rectangle on the image
 fn draw_rect(img: &mut RgbImage, bbox: &Array1<u32>, color: Rgb<u8>, line_width: u32) {
     let (img_width, img_height) = img.dimensions();
-    println!("Image Width: {}, Image Height: {}", img_width, img_height);
+    // println!("Image Width: {}, Image Height: {}", img_width, img_height);
 
     // Extracting bounding box coordinates
     let left = bbox[0] as i32;
     let top = bbox[1] as i32;
     let right = bbox[2] as i32;
     let bottom = bbox[3] as i32;
-    println!(
-        "Left: {}, Top: {}, Right: {}, Bottom: {}",
-        left, top, right, bottom
-    );
+    // println!(
+    //     "Left: {}, Top: {}, Right: {}, Bottom: {}",
+    //     left, top, right, bottom
+    // );
 
     // Drawing the rectangle
     for w in 0..line_width as i32 {
@@ -270,37 +298,49 @@ fn draw_rect(img: &mut RgbImage, bbox: &Array1<u32>, color: Rgb<u8>, line_width:
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let providers = [
+        // DirectMLExecutionProvider::default().build(),
+        CUDAExecutionProvider::default().build(),
+    ];
+    ort::init().with_execution_providers(&providers).commit()?;
+
     let session = Session::builder()?
+        .with_execution_providers(providers)?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(4)?
+        // .with_intra_threads(4)?
         .commit_from_file(env::current_dir()?.join("version-RFB-320.onnx"))?;
+
+    println!("{:?}", session);
+
     display_model_inputs_outputs(&session);
     // panic!();
     let mut img = image::open(r"C:/Users/anand/src/cpp/onnxtest/me.jpg")?.to_rgb8();
     println!("Image dimensions: {:?}", img.dimensions());
-    // let mut cam = initialize_camera()?;
+
+    let mut cam = initialize_camera()?;
     // let frame = cam.frame()?;
+    capture_predict_loop(&mut cam, &session);
 
     let mut rimg = imageops::resize(&img, WIDTH as u32, HEIGHT as u32, imageops::Lanczos3);
 
     let (orig_width, orig_height) = img.dimensions();
     let (mut boxes, mut scores) = prep_img_and_infer(&img, &session)?;
     let box_probs = box_probs_from_outputs(&boxes, &scores);
-    // let bboxes_idxs = hard_nms(&box_probs, IOU_THRESHOLD, TOP_K, 200);
-    // println!("BBoxes_idxs: {:?}", bboxes_idxs);
-    // let bboxes = box_probs.select(Axis(0), &bboxes_idxs);
-    
-    // let pix_bboxes = float_bboxes_to_int(bboxes.clone(), orig_width as usize, orig_height as usize);
-    let pix_bboxes = float_bboxes_to_int(box_probs.clone(), orig_width as usize, orig_height as usize);
+    let bboxes_idxs = hard_nms(&box_probs, IOU_THRESHOLD, TOP_K, 200);
+    let bboxes = box_probs.select(Axis(0), &bboxes_idxs);
 
+    let pix_bboxes = float_bboxes_to_int(bboxes.clone(), orig_width as usize, orig_height as usize);
     println!("BBoxes: {:?}", pix_bboxes);
     for i in 0..pix_bboxes.shape()[0] {
-        draw_rect(&mut img, &pix_bboxes.index_axis(Axis(0), i).to_owned(), Rgb([255, 255, 255]), 5);
+        draw_rect(
+            &mut img,
+            &pix_bboxes.index_axis(Axis(0), i).to_owned(),
+            Rgb([255, 255, 255]),
+            5,
+        );
     }
-    // draw_rect(&mut img, &pix_bboxes.index_axis(Axis(0), 0).to_owned(), Rgb([255, 255, 255]), 5);
 
     img.save("drawn.png")?;
-    // cam.stop_stream()?;
     Ok(())
 }
 
@@ -380,7 +420,7 @@ fn hard_nms(
             .collect::<Vec<_>>();
 
         // println!("IOU : {:?}", iou);
-        println!("IOUs: {:?}", ious);
+        // println!("IOUs: {:?}", ious);
         //     indexes = indexes[iou <= iou_threshold]
         let iou_mask = Array::from_vec(ious).mapv(|x| x <= iou_threshold);
         let mask_idxs = iou_mask
