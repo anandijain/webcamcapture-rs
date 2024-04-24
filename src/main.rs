@@ -16,7 +16,7 @@ use nokhwa::{
 
 use ort::{
     self, inputs, CPUExecutionProvider, CUDAExecutionProvider, DirectMLExecutionProvider,
-    GraphOptimizationLevel,
+    GraphOptimizationLevel, SessionOutputs,
 };
 use ort::{Session, TensorElementType, ValueType};
 use raqote::{DrawOptions, DrawTarget, PathBuilder, SolidSource, Source};
@@ -96,12 +96,6 @@ fn preprocess(img: &RgbImage) -> ndarray::Array4<f32> {
     let raw_data = resized.into_raw(); // This gives us Vec<u8> of the data
     let arr_data = Array::from_shape_vec((height as usize, width as usize, 3), raw_data)
         .expect("Error converting raw buffer to ndarray");
-    // let new_img: RgbImage =
-    //     ImageBuffer::from_raw(width, height, arr_data.clone().into_raw_vec()).expect("Invalid data length");
-    // new_img
-    //     .save("resized.png")
-    //     .expect("Error saving resized image");
-
     let normalized = arr_data.mapv(|x| (x as f32 - 127.0) / 128.0);
     let transposed = normalized.permuted_axes([2, 0, 1]);
     let expanded = transposed.insert_axis(Axis(0));
@@ -139,6 +133,7 @@ fn prep_img_and_infer(
     session: &Session,
 ) -> Result<(ArrayD<f32>, ArrayD<f32>), anyhow::Error> {
     let input = preprocess(&img);
+
     let outputs = session.run(inputs!["input" => input.view()]?)?;
     let mut scores = outputs["scores"]
         .try_extract_tensor::<f32>()?
@@ -167,13 +162,6 @@ fn box_probs_from_outputs(boxes: &ArrayD<f32>, scores: &ArrayD<f32>) -> Array2<f
 
     let filtered_probs = cs.select(Axis(0), &indices);
     let subset_boxes = boxes.select(Axis(0), &indices);
-    // println!("Subset boxes: {:?}", subset_boxes);
-    // println!("scores: {:?}", scores.shape());
-    // println!("Boxes: {:?}", boxes.shape());
-
-    // println!("Mask: {:?}", filtered_probs.shape());
-    // box_probs = np.concatenate([subset_boxes, probs.reshape(-1, 1)], axis=1)
-    // println!("Filtered probs: {:?}", filtered_probs);
 
     let box_probs = Array::from_shape_fn((indices.len(), 5), |(i, j)| {
         if j == 4 {
@@ -199,6 +187,96 @@ fn float_bboxes_to_int(bboxes: Array2<f32>, width: usize, height: usize) -> Arra
     });
     real_boxes
 }
+
+fn preproc_styletransfer(img: &RgbImage, session: &Session) -> Result<Array4<f32>, anyhow::Error> {
+    // let (orig_width, orig_height) = img.dimensions();
+
+    // assume that there is a single input and that it is in (B, C, H, W) format or BCWH idk but that channel is [1]
+    let sess_in = session.inputs.iter().next().expect("No inputs found");
+    let name = sess_in.name.clone();
+    let dims = sess_in.input_type.tensor_dimensions().unwrap();
+    let (width, height) = (dims[3] as u32, dims[2] as u32);
+    let rimg = imageops::resize(img, width, height, image::imageops::FilterType::Nearest);
+    let raw_data = rimg.into_raw(); // This gives us Vec<u8> of the data
+    let arr_data = Array::from_shape_vec((height as usize, width as usize, 3), raw_data.clone())
+        .expect("Error converting raw buffer to ndarray");
+    let f_arr = arr_data.mapv(|x| x as f32);
+    let transposed = f_arr.permuted_axes([2, 0, 1]);
+    let expanded = transposed.insert_axis(Axis(0));
+    Ok(expanded)
+    // Ok(inputs![name => expanded.view()]?) // ideally preproc always returns sessioninputs
+}
+
+fn postproc_styletransfer(
+    out: &SessionOutputs,
+    orig_width: u32,
+    orig_height: u32,
+) -> Result<RgbImage, anyhow::Error> {
+    // assuming output is in BCHW format
+
+    let out = out["output1"].try_extract_tensor::<f32>()?.into_owned();
+    let out2 = out.into_dimensionality::<ndarray::Ix4>().unwrap();
+    let (_b, _c, h, w) = out2.dim();
+
+    let o = out2
+        .mapv(|x| x.max(0.0).min(255.0) as u8)
+        .index_axis(Axis(0), 0)
+        .to_owned();
+
+    let mut out_img: RgbImage = ImageBuffer::new(h as u32, w as u32);
+    // Iterate over each pixel position
+    for y in 0..h {
+        for x in 0..w {
+            let (xx, yy) = (x as usize, y as usize);
+            let (r, g, b) = (o[[0, yy, xx]], o[[1, yy, xx]], o[[2, yy, xx]]);
+            out_img.put_pixel(x as u32, y as u32, Rgb([r, g, b]));
+        }
+    }
+    let out_reshaped = imageops::resize(
+        &out_img,
+        orig_width,
+        orig_height,
+        imageops::FilterType::CatmullRom,
+    );
+    Ok(out_reshaped)
+}
+
+fn imgbuf_to_buf(img: &RgbImage) -> Vec<u32> {
+    let buffer: Vec<u32> = img
+        .enumerate_pixels()
+        .map(|(_, _, pixel)| {
+            let [r, g, b] = pixel.0;
+            (0 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+        })
+        .collect();
+    buffer
+}
+fn new_capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), anyhow::Error> {
+    let r = cam.resolution();
+    let (cam_width, cam_height) = (r.width(), r.height());
+    let mut window = create_window("Raqote", cam_width as usize, cam_height as usize)?;
+    let size = window.get_size();
+    let (orig_width, orig_height) = size;
+    let mut dt = DrawTarget::new(size.0 as i32, size.1 as i32);
+
+    let mut frame_count = 0;
+    let mut last_fps_time = Instant::now();
+    let fps_interval = Duration::new(1, 0); // 1 second
+
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        if let Ok(frame) = cam.frame() {
+            let mut img = frame.decode_image::<RgbFormat>().unwrap(); // Assumes successful decoding
+            let input = preproc_styletransfer(&img, session)?;
+            let pred = session.run(inputs!["input1" => input.view()]?)?;
+            let out_img = postproc_styletransfer(&pred, orig_width as u32, orig_height as u32)?;
+            let out_buf = imgbuf_to_buf(&out_img);
+            window.update_with_buffer(&out_buf, size.0, size.1).unwrap();
+        }
+    }
+    Ok(())
+}
+
+
 
 fn capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), anyhow::Error> {
     let r = cam.resolution();
@@ -258,17 +336,12 @@ fn capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), anyho
 // Function to draw a rectangle on the image
 fn draw_rect(img: &mut RgbImage, bbox: &Array1<u32>, color: Rgb<u8>, line_width: u32) {
     let (img_width, img_height) = img.dimensions();
-    // println!("Image Width: {}, Image Height: {}", img_width, img_height);
 
     // Extracting bounding box coordinates
     let left = bbox[0] as i32;
     let top = bbox[1] as i32;
     let right = bbox[2] as i32;
     let bottom = bbox[3] as i32;
-    // println!(
-    //     "Left: {}, Top: {}, Right: {}, Bottom: {}",
-    //     left, top, right, bottom
-    // );
 
     // Drawing the rectangle
     for w in 0..line_width as i32 {
@@ -308,7 +381,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_execution_providers(providers)?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         // .with_intra_threads(4)?
-        .commit_from_file(env::current_dir()?.join("version-RFB-320.onnx"))?;
+        // .commit_from_file(env::current_dir()?.join("version-RFB-320.onnx"))?;
+        .commit_from_file(env::current_dir()?.join("mosaic-9.onnx"))?;
 
     println!("{:?}", session);
 
@@ -319,7 +393,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut cam = initialize_camera()?;
     // let frame = cam.frame()?;
-    capture_predict_loop(&mut cam, &session);
+    new_capture_predict_loop(&mut cam, &session);
 
     let mut rimg = imageops::resize(&img, WIDTH as u32, HEIGHT as u32, imageops::Lanczos3);
 
