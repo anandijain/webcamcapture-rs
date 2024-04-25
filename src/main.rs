@@ -82,10 +82,10 @@ fn create_window(title: &str, width: usize, height: usize) -> Result<Window, min
     Window::new(title, width, height, WindowOptions::default())
 }
 
-fn initialize_camera() -> Result<Camera, nokhwa::NokhwaError> {
+fn initialize_camera(idx: usize) -> Result<Camera, nokhwa::NokhwaError> {
     let ff = frame_formats();
     let fmt = RequestedFormat::with_formats(RequestedFormatType::AbsoluteHighestFrameRate, ff);
-    let mut cam = Camera::new(CameraIndex::Index(0), fmt)?;
+    let mut cam = Camera::new(CameraIndex::Index(idx as u32), fmt)?;
     cam.open_stream()?;
     Ok(cam)
 }
@@ -381,8 +381,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_execution_providers(providers)?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         // .with_intra_threads(4)?
-        // .commit_from_file(env::current_dir()?.join("version-RFB-320.onnx"))?;
-        .commit_from_file(env::current_dir()?.join("mosaic-9.onnx"))?;
+        .commit_from_file(env::current_dir()?.join("version-RFB-320.onnx"))?;
+        // .commit_from_file(env::current_dir()?.join("mosaic-9.onnx"))?;
 
     println!("{:?}", session);
 
@@ -391,9 +391,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut img = image::open(r"C:/Users/anand/src/cpp/onnxtest/me.jpg")?.to_rgb8();
     println!("Image dimensions: {:?}", img.dimensions());
 
-    let mut cam = initialize_camera()?;
+    let mut cam = initialize_camera(1)?;
     // let frame = cam.frame()?;
-    new_capture_predict_loop(&mut cam, &session);
+    // new_capture_predict_loop(&mut cam, &session);
+    capture_predict_loop(&mut cam, &session);
 
     let mut rimg = imageops::resize(&img, WIDTH as u32, HEIGHT as u32, imageops::Lanczos3);
 

@@ -13,4 +13,6 @@ deps: nokhwa, ort, image, minifb
 
 the biggest issue is that this script takes 70% cpu on my windows machine. so optimization is clearly needed 
 
-
+## the two supported models are
+https://github.com/onnx/models/tree/main/validated/vision/body_analysis/ultraface
+https://github.com/onnx/models/tree/main/validated/vision/style_transfer/fast_neural_style
