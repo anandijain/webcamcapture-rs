@@ -5,7 +5,7 @@ use image::{
     RgbImage,
 };
 use minifb::{Key, Window, WindowOptions};
-use ndarray::prelude::*;
+use ndarray::{prelude::*, Slice};
 use ndarray::{s, Array, Array1, Array2, Array4, ArrayBase, Axis, Data, Ix2, OwnedRepr, Zip};
 use ndarray_npy::write_npy;
 use nokhwa::pixel_format::RgbFormat;
@@ -21,9 +21,9 @@ use ort::{
 use ort::{Session, TensorElementType, ValueType};
 use raqote::{DrawOptions, DrawTarget, PathBuilder, SolidSource, Source};
 use std::cmp::Ordering;
-use std::env;
 use std::error::Error;
 use std::time::{Duration, Instant};
+use std::{env, thread};
 
 // const WIDTH: usize = 320;
 // const HEIGHT: usize = 240;
@@ -276,9 +276,15 @@ fn new_capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), a
     Ok(())
 }
 
-
-
 fn capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), anyhow::Error> {
+    let port_name = "COM5"; // Set this to your Arduino COM port
+    let baud_rate = 9600;
+
+    let mut port = serialport::new(port_name, baud_rate)
+        .timeout(Duration::from_millis(100))
+        .open()
+        .expect("Failed to open port");
+
     let r = cam.resolution();
     let (cam_width, cam_height) = (r.width(), r.height());
     let mut window = create_window("Raqote", cam_width as usize, cam_height as usize)?;
@@ -291,6 +297,7 @@ fn capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), anyho
     let fps_interval = Duration::new(1, 0); // 1 second
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        // loop {
         if let Ok(frame) = cam.frame() {
             frame_count += 1;
 
@@ -300,37 +307,79 @@ fn capture_predict_loop(cam: &mut Camera, session: &Session) -> Result<(), anyho
             let box_probs = box_probs_from_outputs(&boxes, &scores);
             let bboxes_idxs = hard_nms(&box_probs, IOU_THRESHOLD, TOP_K, 200);
             let bboxes = box_probs.select(Axis(0), &bboxes_idxs);
-
+            println!("BBoxes: {:?}", bboxes);
             let pix_bboxes =
                 float_bboxes_to_int(bboxes.clone(), cam_width as usize, cam_height as usize);
+            println!("pixBBoxes: {:?}", pix_bboxes);
+            if !bboxes.is_empty() {
+                println!("notempty BBoxes: {:?}", bboxes);
+                let best = bboxes.index_axis(Axis(0), 0).to_owned();
+                println!("best: {:?}", best);
+                let center = bbox_center(&best);
+                println!("Center: {:?}", center);
 
-            // println!("BBoxes: {:?}", pix_bboxes);
-            for i in 0..pix_bboxes.shape()[0] {
-                draw_rect(
-                    &mut img,
-                    &pix_bboxes.index_axis(Axis(0), i).to_owned(),
-                    Rgb([255, 255, 255]),
-                    5,
-                );
-            }
-            let buffer: Vec<u32> = img
-                .enumerate_pixels()
-                .map(|(_, _, pixel)| {
-                    let [r, g, b] = pixel.0;
-                    (0 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-                })
-                .collect();
+                // Array::
+                // let best = bboxes.index_axis(Axis(0), 0).to_owned();
+                // let best = pix_bboxes.index_axis(Axis(0), 0).to_owned().mapv(|x| x as f32);
+                // let center = bbox_center(&best);
+                // println!("Center: {:?}", center);
+                // println!("best: {:?}", best);
+                for i in 0..pix_bboxes.shape()[0] {
+                    draw_rect(
+                        &mut img,
+                        &pix_bboxes.index_axis(Axis(0), i).to_owned(),
+                        Rgb([255, 255, 255]),
+                        5,
+                    );
+                }
+                let buffer: Vec<u32> = img
+                    .enumerate_pixels()
+                    .map(|(_, _, pixel)| {
+                        let [r, g, b] = pixel.0;
+                        (0 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+                    })
+                    .collect();
 
-            window.update_with_buffer(&buffer, size.0, size.1).unwrap();
-            if last_fps_time.elapsed() >= fps_interval {
-                let fps = frame_count as f32 / last_fps_time.elapsed().as_secs_f32();
-                println!("FPS: {}", fps);
-                frame_count = 0;
-                last_fps_time = Instant::now();
+                window.update_with_buffer(&buffer, size.0, size.1).unwrap();
+                if last_fps_time.elapsed() >= fps_interval {
+                    let fps = frame_count as f32 / last_fps_time.elapsed().as_secs_f32();
+                    println!("FPS: {}", fps);
+                    frame_count = 0;
+                    last_fps_time = Instant::now();
+                }
+
+                let send_str = format!("[{},{}]\n", center[0], center[1]);
+                println!("Sending: {}", send_str);
+                port.write(send_str.as_bytes())
+                    .expect("Failed to write to port");
+                // thread::sleep(Duration::from_millis(500)); // Wait a bit for Arduino to respond
+
+                let mut serial_buf: Vec<u8> = vec![0; 128];
+                match port.read(serial_buf.as_mut_slice()) {
+                    Ok(t) => println!(
+                        "Read {} bytes: {:?}",
+                        t,
+                        String::from_utf8_lossy(&serial_buf[..t])
+                    ),
+                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                        println!("Read timed out")
+                    }
+                    Err(e) => eprintln!("{:?}", e),
+                }
             }
         }
     }
     Ok(())
+}
+
+fn bbox_center(bbox: &Array1<f32>) -> Array1<f32> {
+    let x1 = bbox[0];
+    let y1 = bbox[1];
+    let x2 = bbox[2];
+    let y2 = bbox[3];
+    let x = (x1 + x2) / 2.0;
+    let y = (y1 + y2) / 2.0;
+    array![x, y]
 }
 
 // Function to draw a rectangle on the image
@@ -382,7 +431,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         // .with_intra_threads(4)?
         .commit_from_file(env::current_dir()?.join("version-RFB-320.onnx"))?;
-        // .commit_from_file(env::current_dir()?.join("mosaic-9.onnx"))?;
+    // .commit_from_file(env::current_dir()?.join("mosaic-9.onnx"))?;
 
     println!("{:?}", session);
 

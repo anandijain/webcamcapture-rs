@@ -16,3 +16,17 @@ the biggest issue is that this script takes 70% cpu on my windows machine. so op
 ## the two supported models are
 https://github.com/onnx/models/tree/main/validated/vision/body_analysis/ultraface
 https://github.com/onnx/models/tree/main/validated/vision/style_transfer/fast_neural_style
+
+
+servo powersupply transformer note. the two sheaths of wire. ;the outer is gnd and the inner is + 
+
+
+plan 
+- get camera pos to control 2 servos
+    - 
+- mount the servos or at least one for pan support
+- rewrite to be an obs plugin (involves rewriting the postprocessing code)
+- wireless
+- drone 
+- robot 
+- robot self replicates 

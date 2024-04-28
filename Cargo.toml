@@ -14,6 +14,7 @@ ndarray-npy = "0.8.1"
 ort = { path = "../ort", features = [] }
 raqote = "0.8.4"
 rav1e = "0.7.1"
+serialport = "4.3.0"
 [features]
 default = ["nokhwa/default"]
 
